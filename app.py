@@ -96,20 +96,32 @@ def indexed_search(query,region):
     clause=' OR '.join(f'site:{d}' for d in REGION_DOMAINS[region])
     negatives=' -sold -"sold out" -reserved -myyty -varattu -archived -expired -"not available"'
     out=[]; seen=set()
-    for x in brave_search(f'"{query}" ({clause}) {negatives}',18,freshness='pm'):
-        u=x.get('url','')
-        if not u or u in seen or looks_inactive(x) or not looks_like_listing(u):
-            continue
-        seen.add(u)
-        out.append({
-            'title':x.get('title',''),
-            'source':f"Indexed: {urlparse(u).netloc.replace('www.','')}",
-            'price':0,
-            'shipping':0,
-            'url':u,
-            'active_check':'LIKELY ACTIVE / NO SOLD SIGNAL',
-            'indexed_age':x.get('age','')
-        })
+
+    def collect(results,label,strict_listing=True):
+        for x in results:
+            u=x.get('url','')
+            if not u or u in seen or looks_inactive(x):
+                continue
+            if strict_listing and not looks_like_listing(u):
+                continue
+            seen.add(u)
+            out.append({
+                'title':x.get('title',''),
+                'source':f"Indexed: {urlparse(u).netloc.replace('www.','')}",
+                'price':0,
+                'shipping':0,
+                'url':u,
+                'active_check':label,
+                'indexed_age':x.get('age','')
+            })
+
+    # Prefer recent listing pages first.
+    collect(brave_search(f'"{query}" ({clause}) {negatives}',20,freshness='pm'),'RECENT / NO SOLD SIGNAL',True)
+
+    # If too few results are found, broaden the index automatically.
+    if len(out) < 4:
+        collect(brave_search(f'"{query}" ({clause}) {negatives}',20,freshness=None),'NO SOLD SIGNAL',True)
+
     return out
 def wholesaler_search(category,region):
     out=[]; seen=set()
@@ -134,7 +146,7 @@ def show_suppliers(df):
     if 'URL' in view.columns:
         view=view.rename(columns={'URL':'Open website'})
         config['Open website']=st.column_config.LinkColumn('Open website',display_text='Open ↗')
-    st.dataframe(view,use_container_width=True,hide_index=True,column_config=config)
+    st.dataframe(view,width='stretch',hide_index=True,column_config=config)
 st.title('👖 Vintage Deal Finder EU'); st.caption(f'Finland/EU sourcing across {len(PRICEBOOK)} high-interest vintage targets — denim, workwear, sportswear, Y2K, outdoor, racing, streetwear and archive.')
 with st.sidebar:
     st.header('Deal rules'); min_roi=st.number_input('Minimum ROI %',0,1000,80,10); min_profit=st.number_input('Minimum profit €',0,1000,20,5); max_buy=st.number_input('Maximum item price €',1,1000,60,5); max_shipping=st.number_input('Maximum shipping to Finland €',0,200,12,1); friction=st.number_input('Selling friction %',0,50,12,1); region=st.selectbox('Preferred sourcing region',['Finland','EU','Nordics','Europe'])
@@ -145,7 +157,7 @@ with t1:
     opts=sum([p['keywords'] for p in filtered],[])
     suggested=[p['keywords'][0] for p in filtered[:10]]
     selected=st.multiselect('Searches',opts,default=suggested[:8])
-    st.caption(f'{len(filtered)} resale targets in this category. Results favor recent indexed listing pages and remove sold/reserved/expired signals.')
+    st.caption(f'{len(filtered)} resale targets in this category. Search prefers recent listings and automatically widens if needed while filtering sold/reserved/expired signals.')
     if st.button('Search Europe',type='primary'):
         raw=[]
         try:
@@ -156,7 +168,7 @@ with t1:
             save_deals(scored)
             show_deals(pd.DataFrame(scored).sort_values(['decision_rank','score'],ascending=[True,False]))
         else:
-            st.info('No matching active-looking listings found right now. Try another search term or broader region.')
+            st.info('No matching active-looking listings found. Try fewer selected searches, another category, or switch Preferred sourcing region to EU/Europe.')
 with t2:
     st.write('Upload CSV columns: title,price,shipping,url,source.'); f=st.file_uploader('CSV file',type=['csv'])
     if f:
