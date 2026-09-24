@@ -77,7 +77,7 @@ INACTIVE_TERMS = [
 def brave_search(q,count=10,freshness=None):
     key=os.getenv('BRAVE_SEARCH_API_KEY')
     if not key: raise RuntimeError('Add BRAVE_SEARCH_API_KEY in Railway Variables to enable live search.')
-    params={'q':q,'count':min(count,20),'search_lang':'en'}
+    params={'q':q,'count':min(count,20),'extra_snippets':True,'include_fetch_metadata':True}
     if freshness:
         params['freshness']=freshness
     r=requests.get(
@@ -114,6 +114,42 @@ def looks_like_listing(url):
     if 'tori.fi' in host:
         return '/recommerce/forsale/item/' in path or '/recommerce/forsale/search' not in low
     return True
+
+def _to_price(value):
+    try:
+        if isinstance(value,(int,float)):
+            v=float(value)
+        else:
+            raw=str(value).strip().replace('\xa0',' ')
+            raw=re.sub(r'[^0-9,.-]','',raw).replace(',','.')
+            if raw.count('.')>1:
+                return 0
+            v=float(raw)
+        return round(v,2) if 2 <= v <= 1500 else 0
+    except Exception:
+        return 0
+
+def extract_price_from_schemas(schemas):
+    candidates=[]
+    def walk(obj,currency_hint=''):
+        if isinstance(obj,dict):
+            currency=str(obj.get('priceCurrency',currency_hint) or currency_hint).upper()
+            for key in ('price','lowPrice','highPrice'):
+                if key in obj:
+                    value=_to_price(obj.get(key))
+                    if value:
+                        priority=0 if currency in ('EUR','€','') else 1
+                        candidates.append((priority,value,currency))
+            for value in obj.values():
+                walk(value,currency)
+        elif isinstance(obj,list):
+            for value in obj:
+                walk(value,currency_hint)
+    walk(schemas or [])
+    if not candidates:
+        return 0
+    candidates.sort(key=lambda x:(x[0],x[1]))
+    return candidates[0][1]
 
 def extract_price_from_text(text):
     text=str(text or '')
@@ -187,17 +223,21 @@ def indexed_search(query,region,sources):
                 continue
             if strict_listing and not looks_like_listing(u):
                 continue
-            snippet=' '.join([str(x.get('title','')),str(x.get('description',''))])
-            price=extract_price_from_text(snippet)
+            snippets=[str(x.get('title','')),str(x.get('description',''))]
+            snippets += [str(v) for v in (x.get('extra_snippets') or [])]
+            snippet=' '.join(snippets)
+            price=extract_price_from_schemas(x.get('schemas')) or extract_price_from_text(snippet)
             seen.add(u)
+            host=urlparse(u).netloc.replace('www.','')
             out.append({
-                'title':x.get('title',''),
-                'source':f"Indexed: {urlparse(u).netloc.replace('www.','')}",
+                'title':x.get('title','') or 'Untitled listing',
+                'source':host,
                 'price':price,
                 'shipping':0,
                 'url':u,
+                'snippet':str(x.get('description','') or '')[:220],
                 'active_check':label,
-                'indexed_age':x.get('age','')
+                'indexed_age':x.get('page_age') or x.get('age','')
             })
 
     # Prefer recent listing pages first.
@@ -218,12 +258,46 @@ def wholesaler_search(category,region):
     return out[:25]
 
 def show_deals(df):
-    view=df.copy()
-    config={}
-    if 'url' in view.columns:
-        view=view.rename(columns={'url':'Open listing'})
-        config['Open listing']=st.column_config.LinkColumn('Open listing',display_text='Open ↗')
-    st.dataframe(view,width='stretch',hide_index=True,column_config=config)
+    if df is None or df.empty:
+        st.info('No results.')
+        return
+    st.caption(f'{len(df)} results')
+    for _,row in df.head(30).iterrows():
+        title=str(row.get('title') or 'Untitled listing')
+        source=str(row.get('source') or '')
+        price=row.get('buy_price_eur')
+        resale=row.get('estimated_resale_eur')
+        profit=row.get('estimated_profit_eur')
+        roi=row.get('roi_pct')
+        decision=str(row.get('decision') or '')
+        risk=str(row.get('risk') or '')
+        url=str(row.get('url') or '')
+        snippet=str(row.get('snippet') or '')
+        active=str(row.get('active_check') or '')
+        with st.container(border=True):
+            st.markdown(f'### {title}')
+            st.caption(f'{source}  •  {active}')
+            if snippet:
+                st.write(snippet)
+            c1,c2=st.columns(2)
+            with c1:
+                st.metric('Ostohinta', f'{float(price):.2f} €' if pd.notna(price) and price not in (None,'') else 'Ei saatavilla')
+                st.metric('Arvioitu jälleenmyynti', f'{float(resale):.2f} €' if pd.notna(resale) and resale not in (None,'') else '—')
+            with c2:
+                st.metric('Arvioitu voitto', f'{float(profit):.2f} €' if pd.notna(profit) and profit not in (None,'') else '—')
+                st.metric('ROI', f'{float(roi):.0f} %' if pd.notna(roi) and roi not in (None,'') else '—')
+            st.write(f'**Arvio:** {decision}   |   **Riski:** {risk}')
+            if url.startswith('http'):
+                st.link_button('Avaa ilmoitus ↗',url,width='stretch')
+    with st.expander('Näytä tekninen taulukko'):
+        view=df.copy()
+        config={}
+        if 'url' in view.columns:
+            view=view.rename(columns={'url':'Open listing'})
+            config['Open listing']=st.column_config.LinkColumn('Open listing',display_text='Open ↗')
+        preferred=['title','source','buy_price_eur','estimated_resale_eur','estimated_profit_eur','roi_pct','decision','active_check','Open listing']
+        cols=[c for c in preferred if c in view.columns]+[c for c in view.columns if c not in preferred]
+        st.dataframe(view[cols],width='stretch',hide_index=True,column_config=config)
 
 def show_suppliers(df):
     view=df.copy()
@@ -247,7 +321,7 @@ with t1:
         list(MARKETPLACE_DOMAINS.keys()),
         default=['Vinted','Depop','Grailed','Tradera','Sellpy']
     )
-    st.caption(f'{len(filtered)} resale targets in this category. The app reads price only when it is visible in the indexed listing text. Unknown prices are always CHECK PRICE — never BUY/MAYBE.')
+    st.caption(f'{len(filtered)} resale targets in this category. The app checks structured product data plus multiple search snippets for price. If price is still unavailable, the result stays CHECK PRICE.')
     if st.button('Search Europe',type='primary'):
         raw=[]
         chosen=selected[:6]
