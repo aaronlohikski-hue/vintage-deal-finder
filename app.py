@@ -187,17 +187,16 @@ def indexed_search(query,region,sources):
                 continue
             if strict_listing and not looks_like_listing(u):
                 continue
-            check=live_listing_check(u,' '.join([str(x.get('title','')),str(x.get('description',''))]))
-            if check.get('active_check')=='INACTIVE':
-                continue
+            snippet=' '.join([str(x.get('title','')),str(x.get('description',''))])
+            price=extract_price_from_text(snippet)
             seen.add(u)
             out.append({
                 'title':x.get('title',''),
                 'source':f"Indexed: {urlparse(u).netloc.replace('www.','')}",
-                'price':check.get('price',0),
+                'price':price,
                 'shipping':0,
                 'url':u,
-                'active_check':check.get('active_check',label),
+                'active_check':label,
                 'indexed_age':x.get('age','')
             })
 
@@ -242,18 +241,30 @@ with t1:
     filtered=PRICEBOOK if search_category=='All' else [p for p in PRICEBOOK if p['category']==search_category]
     opts=sum([p['keywords'] for p in filtered],[])
     suggested=[p['keywords'][0] for p in filtered[:10]]
-    selected=st.multiselect('Searches',opts,default=suggested[:8])
+    selected=st.multiselect('Searches',opts,default=suggested[:4])
     sources=st.multiselect(
         'Marketplaces',
         list(MARKETPLACE_DOMAINS.keys()),
         default=['Vinted','Depop','Grailed','Tradera','Sellpy']
     )
-    st.caption(f'{len(filtered)} resale targets in this category. The app now tries to read the real listing price. If price is unknown, it will only show CHECK PRICE — never BUY/MAYBE.')
+    st.caption(f'{len(filtered)} resale targets in this category. The app reads price only when it is visible in the indexed listing text. Unknown prices are always CHECK PRICE — never BUY/MAYBE.')
     if st.button('Search Europe',type='primary'):
         raw=[]
+        chosen=selected[:6]
+        if len(selected)>6:
+            st.info('Searching the first 6 selected terms to keep the search fast.')
         try:
-            for q in selected: raw+=indexed_search(q,region,sources)
-        except Exception as e: st.warning(str(e))
+            with st.spinner('Searching active-looking listings...'):
+                for q in chosen:
+                    raw+=indexed_search(q,region,sources)
+        except requests.HTTPError as e:
+            code=getattr(e.response,'status_code',None)
+            if code==429:
+                st.warning('Search API rate limit reached. Try again in a moment or select fewer searches.')
+            else:
+                st.warning(f'Search service error: {e}')
+        except Exception as e:
+            st.warning(f'Search error: {e}')
         if raw:
             scored=[score_item(x,min_roi,min_profit,friction) for x in raw]
             save_deals(scored)
@@ -286,4 +297,4 @@ with t5:
     with db() as c: rows=c.execute('SELECT title,source,url,buy,resale,profit,roi,score,decision,created FROM deals ORDER BY created DESC LIMIT 500').fetchall()
     if rows: show_deals(pd.DataFrame(rows,columns=['title','source','url','buy','resale','profit','roi','score','decision','created']))
     else: st.info('No saved deals yet.')
-st.caption('Live search uses public indexed pages plus normal page requests when available. It does not bypass marketplace anti-bot protections. Facebook Marketplace coverage can be limited because many listings are not publicly indexed.')
+st.caption('Live search uses public indexed marketplace pages. It does not bypass marketplace anti-bot protections. Facebook Marketplace coverage can be limited because many listings are not publicly indexed.')
