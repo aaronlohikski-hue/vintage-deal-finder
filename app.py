@@ -44,15 +44,72 @@ def save_deals(rows):
         for d in rows:
             fp=hashlib.sha256(((d.get('url') or '')+'|'+d.get('title','')).encode()).hexdigest()
             c.execute('INSERT OR IGNORE INTO deals VALUES (?,?,?,?,?,?,?,?,?,?,?)',(fp,d.get('title',''),d.get('source',''),d.get('url',''),d.get('total_buy_eur',0),d.get('estimated_resale_eur',0),d.get('estimated_profit_eur',0),d.get('roi_pct',0),d.get('score',0),d.get('decision',''),int(time.time())))
-def brave_search(q,count=10):
+INACTIVE_TERMS = [
+    'sold','sold out','item sold','already sold','reserved','reservation',
+    'myyty','myyty loppuun','varattu','poistettu','deleted','removed',
+    'archived','archive listing','not available','unavailable','expired',
+    'ended','listing ended','no longer available'
+]
+
+def brave_search(q,count=10,freshness='pw'):
     key=os.getenv('BRAVE_SEARCH_API_KEY')
     if not key: raise RuntimeError('Add BRAVE_SEARCH_API_KEY in Railway Variables to enable live search.')
-    r=requests.get('https://api.search.brave.com/res/v1/web/search',headers={'Accept':'application/json','X-Subscription-Token':key},params={'q':q,'count':min(count,20),'search_lang':'en'},timeout=20)
-    r.raise_for_status(); return r.json().get('web',{}).get('results',[])
+    params={'q':q,'count':min(count,20),'search_lang':'en'}
+    if freshness:
+        params['freshness']=freshness
+    r=requests.get(
+        'https://api.search.brave.com/res/v1/web/search',
+        headers={'Accept':'application/json','X-Subscription-Token':key},
+        params=params,
+        timeout=20
+    )
+    r.raise_for_status()
+    return r.json().get('web',{}).get('results',[])
+
+def looks_inactive(result):
+    text=' '.join([
+        str(result.get('title','')),
+        str(result.get('description','')),
+        str(result.get('url',''))
+    ]).lower()
+    return any(term in text for term in INACTIVE_TERMS)
+
+def looks_like_listing(url):
+    low=(url or '').lower()
+    host=urlparse(low).netloc.replace('www.','')
+    path=urlparse(low).path
+    if 'vinted.' in host:
+        return '/items/' in path
+    if 'grailed.com' in host:
+        return '/listings/' in path
+    if 'depop.com' in host:
+        return '/products/' in path
+    if 'tradera.com' in host:
+        return '/item/' in path or '/listing/' in path
+    if 'sellpy.' in host:
+        return '/item/' in path or '/product/' in path
+    if 'tori.fi' in host:
+        return '/recommerce/forsale/item/' in path or '/recommerce/forsale/search' not in low
+    return True
+
 def indexed_search(query,region):
-    clause=' OR '.join(f'site:{d}' for d in REGION_DOMAINS[region]); out=[]
-    for x in brave_search(f'"{query}" ({clause})',12):
-        u=x.get('url',''); out.append({'title':x.get('title',''),'source':f"Indexed: {urlparse(u).netloc.replace('www.','')}",'price':0,'shipping':0,'url':u})
+    clause=' OR '.join(f'site:{d}' for d in REGION_DOMAINS[region])
+    negatives=' -sold -"sold out" -reserved -myyty -varattu -archived -expired -"not available"'
+    out=[]; seen=set()
+    for x in brave_search(f'"{query}" ({clause}) {negatives}',18,freshness='pw'):
+        u=x.get('url','')
+        if not u or u in seen or looks_inactive(x) or not looks_like_listing(u):
+            continue
+        seen.add(u)
+        out.append({
+            'title':x.get('title',''),
+            'source':f"Indexed: {urlparse(u).netloc.replace('www.','')}",
+            'price':0,
+            'shipping':0,
+            'url':u,
+            'active_check':'RECENT / NO SOLD SIGNAL',
+            'indexed_age':x.get('age','')
+        })
     return out
 def wholesaler_search(category,region):
     out=[]; seen=set()
@@ -88,7 +145,7 @@ with t1:
     opts=sum([p['keywords'] for p in filtered],[])
     suggested=[p['keywords'][0] for p in filtered[:10]]
     selected=st.multiselect('Searches',opts,default=suggested[:8])
-    st.caption(f'{len(filtered)} resale targets in this category. Select specific searches or run the suggested set.')
+    st.caption(f'{len(filtered)} resale targets in this category. Results are filtered to recent indexed listing pages and sold/reserved/expired signals are excluded.')
     if st.button('Search Europe',type='primary'):
         raw=[]
         try:
