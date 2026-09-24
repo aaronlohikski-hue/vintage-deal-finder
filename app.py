@@ -8,6 +8,15 @@ from catalog import PRICEBOOK, CATEGORIES
 st.set_page_config(page_title='Vintage Deal Finder EU', page_icon='👖', layout='wide')
 
 REGION_DOMAINS={'Finland':['vinted.fi','tori.fi','huuto.net'],'Nordics':['vinted.fi','tori.fi','tradera.com','sellpy.fi','sellpy.se'],'EU':['vinted.fi','vinted.fr','vinted.de','vinted.nl','vinted.be','vinted.es','vinted.it','vinted.pt','tori.fi','tradera.com','sellpy.fi','sellpy.se','depop.com','grailed.com'],'Europe':['vinted.fi','vinted.fr','vinted.de','vinted.nl','vinted.be','vinted.es','vinted.it','vinted.pt','tori.fi','tradera.com','sellpy.fi','sellpy.se','depop.com','grailed.com']}
+MARKETPLACE_DOMAINS={
+    'Vinted':['vinted.fi','vinted.fr','vinted.de','vinted.nl','vinted.be','vinted.es','vinted.it','vinted.pt'],
+    'Depop':['depop.com'],
+    'Grailed':['grailed.com'],
+    'Tradera':['tradera.com'],
+    'Sellpy':['sellpy.fi','sellpy.se'],
+    'Tori':['tori.fi'],
+    'Facebook Marketplace':['facebook.com/marketplace']
+}
 DB='/tmp/deals.db'
 def db(): return sqlite3.connect(DB)
 def init_db():
@@ -23,22 +32,36 @@ def match_target(title):
     return best if bs>=2 else None
 def score_item(item,min_roi,min_profit,friction):
     title=item.get('title',''); low=title.lower(); target=match_target(title)
-    price=float(item.get('price',0) or 0); shipping=float(item.get('shipping',0) or 0); buy=round(price+shipping,2)
-    resale=target['resale'] if target else max(20,buy*1.45); bonus=0; risks=[]
+    price=float(item.get('price',0) or 0); shipping=float(item.get('shipping',0) or 0)
+    price_known=price>0
+    buy=round(price+shipping,2) if price_known else 0
+    resale=target['resale'] if target else 0
+    bonus=0; risks=[]
     if target:
-        for s in target['signals']:
-            if s in low: bonus+=4
-    for s in ['fake','replica','stain','hole','broken zip','kids','child']:
-        if s in low: risks.append(s)
-    resale=round(resale*(1+min(bonus,30)/100-max(0,len(risks)*0.08)),2)
-    profit=round(resale-buy-resale*(friction/100),2); roi=round(profit/buy*100,1) if buy>0 else 0
-    score=10+(30 if target else 0)+(20 if target and buy and buy<=target['great_buy'] else 0)+min(25,max(0,roi/8))+min(15,bonus/2)-min(25,len(risks)*8)
-    if buy<=0: decision,rank='CHECK PRICE',2
-    elif len(risks)>=2: decision,rank='SKIP / INSPECT',3
-    elif profit>=min_profit and roi>=min_roi: decision,rank='BUY',0
-    elif profit>0 and roi>=40: decision,rank='MAYBE',1
-    else: decision,rank='SKIP',3
-    return {**item,'matched_target':target['name'] if target else '','total_buy_eur':buy,'estimated_resale_eur':resale,'estimated_profit_eur':profit,'roi_pct':roi,'score':round(max(0,min(100,score)),1),'decision':decision,'decision_rank':rank,'risk':(', '.join(risks) if risks else (target['risk'] if target else 'Unknown'))}
+        for sig in target['signals']:
+            if sig in low: bonus+=4
+    for sig in ['fake','replica','stain','hole','broken zip','kids','child']:
+        if sig in low: risks.append(sig)
+    if resale>0:
+        resale=round(resale*(1+min(bonus,30)/100-max(0,len(risks)*0.08)),2)
+    profit=round(resale-buy-resale*(friction/100),2) if price_known and resale>0 else 0
+    roi=round(profit/buy*100,1) if price_known and buy>0 and resale>0 else 0
+    score=10+(30 if target else 0)+min(15,bonus/2)-min(25,len(risks)*8)
+    if price_known and target and buy<=target['great_buy']: score+=20
+    if price_known: score+=min(25,max(0,roi/8))
+    if not price_known:
+        decision,rank='CHECK PRICE',2
+    elif not target:
+        decision,rank='INSPECT',2
+    elif len(risks)>=2:
+        decision,rank='SKIP / INSPECT',3
+    elif profit>=min_profit and roi>=min_roi:
+        decision,rank='BUY',0
+    elif profit>0 and roi>=40:
+        decision,rank='MAYBE',1
+    else:
+        decision,rank='SKIP',3
+    return {**item,'matched_target':target['name'] if target else '','buy_price_eur':price if price_known else None,'shipping_eur':shipping if shipping>0 else None,'total_buy_eur':buy if price_known else None,'estimated_resale_eur':resale if resale>0 else None,'estimated_profit_eur':profit if price_known and resale>0 else None,'roi_pct':roi if price_known and resale>0 else None,'score':round(max(0,min(100,score)),1),'decision':decision,'decision_rank':rank,'risk':(', '.join(risks) if risks else (target['risk'] if target else 'Unknown'))}
 def save_deals(rows):
     with db() as c:
         for d in rows:
@@ -92,8 +115,68 @@ def looks_like_listing(url):
         return '/recommerce/forsale/item/' in path or '/recommerce/forsale/search' not in low
     return True
 
-def indexed_search(query,region):
-    clause=' OR '.join(f'site:{d}' for d in REGION_DOMAINS[region])
+def extract_price_from_text(text):
+    text=str(text or '')
+    patterns=[
+        r'"price"\s*:\s*"?([0-9]{1,4}(?:[.,][0-9]{1,2})?)',
+        r'content=["\']([0-9]{1,4}(?:[.,][0-9]{1,2})?)["\'][^>]{0,80}(?:price|amount)',
+        r'(?:€|EUR\s*)([0-9]{1,4}(?:[.,][0-9]{1,2})?)',
+        r'([0-9]{1,4}(?:[.,][0-9]{1,2})?)\s*(?:€|EUR)'
+    ]
+    for pattern in patterns:
+        for m in re.findall(pattern,text,re.I):
+            try:
+                value=float(str(m).replace(',','.'))
+                if 2 <= value <= 1500:
+                    return round(value,2)
+            except Exception:
+                pass
+    return 0
+
+def live_listing_check(url, fallback_text=''):
+    result={'active_check':'UNVERIFIED','price':extract_price_from_text(fallback_text)}
+    try:
+        r=requests.get(
+            url,
+            headers={'User-Agent':'Mozilla/5.0 (compatible; VintageDealFinder/1.0)'},
+            timeout=8,
+            allow_redirects=True
+        )
+        if r.status_code in (404,410):
+            result['active_check']='INACTIVE'
+            return result
+        if r.status_code==200:
+            page=r.text[:1500000]
+            low=page.lower()
+            if any(term in low for term in INACTIVE_TERMS):
+                result['active_check']='INACTIVE'
+                return result
+            page_price=extract_price_from_text(page)
+            if page_price:
+                result['price']=page_price
+            result['active_check']='ACTIVE'
+            return result
+        if r.status_code in (401,403,429):
+            result['active_check']='UNVERIFIED / SITE BLOCKED CHECK'
+            return result
+    except Exception:
+        pass
+    return result
+
+def selected_domains(region,sources):
+    region_domains=set(REGION_DOMAINS[region])
+    out=[]
+    for source in sources:
+        for domain in MARKETPLACE_DOMAINS.get(source,[]):
+            root=domain.split('/')[0]
+            if source=='Facebook Marketplace' or root in region_domains or region in ('EU','Europe'):
+                out.append(domain)
+    return list(dict.fromkeys(out))
+
+def indexed_search(query,region,sources):
+    domains=selected_domains(region,sources)
+    if not domains: return []
+    clause=' OR '.join(f'site:{d}' for d in domains)
     negatives=' -sold -"sold out" -reserved -myyty -varattu -archived -expired -"not available"'
     out=[]; seen=set()
 
@@ -104,14 +187,17 @@ def indexed_search(query,region):
                 continue
             if strict_listing and not looks_like_listing(u):
                 continue
+            check=live_listing_check(u,' '.join([str(x.get('title','')),str(x.get('description',''))]))
+            if check.get('active_check')=='INACTIVE':
+                continue
             seen.add(u)
             out.append({
                 'title':x.get('title',''),
                 'source':f"Indexed: {urlparse(u).netloc.replace('www.','')}",
-                'price':0,
+                'price':check.get('price',0),
                 'shipping':0,
                 'url':u,
-                'active_check':label,
+                'active_check':check.get('active_check',label),
                 'indexed_age':x.get('age','')
             })
 
@@ -157,11 +243,16 @@ with t1:
     opts=sum([p['keywords'] for p in filtered],[])
     suggested=[p['keywords'][0] for p in filtered[:10]]
     selected=st.multiselect('Searches',opts,default=suggested[:8])
-    st.caption(f'{len(filtered)} resale targets in this category. Search prefers recent listings and automatically widens if needed while filtering sold/reserved/expired signals.')
+    sources=st.multiselect(
+        'Marketplaces',
+        list(MARKETPLACE_DOMAINS.keys()),
+        default=['Vinted','Depop','Grailed','Tradera','Sellpy']
+    )
+    st.caption(f'{len(filtered)} resale targets in this category. The app now tries to read the real listing price. If price is unknown, it will only show CHECK PRICE — never BUY/MAYBE.')
     if st.button('Search Europe',type='primary'):
         raw=[]
         try:
-            for q in selected: raw+=indexed_search(q,region)
+            for q in selected: raw+=indexed_search(q,region,sources)
         except Exception as e: st.warning(str(e))
         if raw:
             scored=[score_item(x,min_roi,min_profit,friction) for x in raw]
@@ -195,4 +286,4 @@ with t5:
     with db() as c: rows=c.execute('SELECT title,source,url,buy,resale,profit,roi,score,decision,created FROM deals ORDER BY created DESC LIMIT 500').fetchall()
     if rows: show_deals(pd.DataFrame(rows,columns=['title','source','url','buy','resale','profit','roi','score','decision','created']))
     else: st.info('No saved deals yet.')
-st.caption('Live web search uses a search API and does not bypass marketplace anti-bot protections.')
+st.caption('Live search uses public indexed pages plus normal page requests when available. It does not bypass marketplace anti-bot protections. Facebook Marketplace coverage can be limited because many listings are not publicly indexed.')
