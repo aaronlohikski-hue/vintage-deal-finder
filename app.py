@@ -51,7 +51,7 @@ INACTIVE_TERMS = [
     'ended','listing ended','no longer available'
 ]
 
-def brave_search(q,count=10,freshness='pw'):
+def brave_search(q,count=10,freshness=None):
     key=os.getenv('BRAVE_SEARCH_API_KEY')
     if not key: raise RuntimeError('Add BRAVE_SEARCH_API_KEY in Railway Variables to enable live search.')
     params={'q':q,'count':min(count,20),'search_lang':'en'}
@@ -96,7 +96,7 @@ def indexed_search(query,region):
     clause=' OR '.join(f'site:{d}' for d in REGION_DOMAINS[region])
     negatives=' -sold -"sold out" -reserved -myyty -varattu -archived -expired -"not available"'
     out=[]; seen=set()
-    for x in brave_search(f'"{query}" ({clause}) {negatives}',18,freshness='pw'):
+    for x in brave_search(f'"{query}" ({clause}) {negatives}',18,freshness='pm'):
         u=x.get('url','')
         if not u or u in seen or looks_inactive(x) or not looks_like_listing(u):
             continue
@@ -107,7 +107,7 @@ def indexed_search(query,region):
             'price':0,
             'shipping':0,
             'url':u,
-            'active_check':'RECENT / NO SOLD SIGNAL',
+            'active_check':'LIKELY ACTIVE / NO SOLD SIGNAL',
             'indexed_age':x.get('age','')
         })
     return out
@@ -126,7 +126,7 @@ def show_deals(df):
     if 'url' in view.columns:
         view=view.rename(columns={'url':'Open listing'})
         config['Open listing']=st.column_config.LinkColumn('Open listing',display_text='Open ↗')
-    st.dataframe(view,use_container_width=True,hide_index=True,column_config=config)
+    st.dataframe(view,width='stretch',hide_index=True,column_config=config)
 
 def show_suppliers(df):
     view=df.copy()
@@ -145,7 +145,7 @@ with t1:
     opts=sum([p['keywords'] for p in filtered],[])
     suggested=[p['keywords'][0] for p in filtered[:10]]
     selected=st.multiselect('Searches',opts,default=suggested[:8])
-    st.caption(f'{len(filtered)} resale targets in this category. Results are filtered to recent indexed listing pages and sold/reserved/expired signals are excluded.')
+    st.caption(f'{len(filtered)} resale targets in this category. Results favor recent indexed listing pages and remove sold/reserved/expired signals.')
     if st.button('Search Europe',type='primary'):
         raw=[]
         try:
@@ -155,6 +155,8 @@ with t1:
             scored=[score_item(x,min_roi,min_profit,friction) for x in raw]
             save_deals(scored)
             show_deals(pd.DataFrame(scored).sort_values(['decision_rank','score'],ascending=[True,False]))
+        else:
+            st.info('No matching active-looking listings found right now. Try another search term or broader region.')
 with t2:
     st.write('Upload CSV columns: title,price,shipping,url,source.'); f=st.file_uploader('CSV file',type=['csv'])
     if f:
@@ -175,7 +177,7 @@ with t3:
 with t4:
     price_category=st.selectbox('Filter pricebook',CATEGORIES,key='price_category')
     price_rows=PRICEBOOK if price_category=='All' else [p for p in PRICEBOOK if p['category']==price_category]
-    st.dataframe(pd.DataFrame([{'Category':p['category'],'Target':p['name'],'Typical resale €':p['resale'],'Strong buy ≤ €':p['great_buy'],'Counterfeit risk':p['risk'],'Signals':', '.join(p['signals'])} for p in price_rows]),use_container_width=True,hide_index=True)
+    st.dataframe(pd.DataFrame([{'Category':p['category'],'Target':p['name'],'Typical resale €':p['resale'],'Strong buy ≤ €':p['great_buy'],'Counterfeit risk':p['risk'],'Signals':', '.join(p['signals'])} for p in price_rows]),width='stretch',hide_index=True)
     st.caption('Starter estimates only — verify condition, authenticity and recent sold comps before buying.')
 with t5:
     with db() as c: rows=c.execute('SELECT title,source,url,buy,resale,profit,roi,score,decision,created FROM deals ORDER BY created DESC LIMIT 500').fetchall()
