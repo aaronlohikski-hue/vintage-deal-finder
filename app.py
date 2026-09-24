@@ -257,38 +257,92 @@ def wholesaler_search(category,region):
             seen.add(u); out.append({'Supplier':x.get('title',''),'URL':u,'Description':x.get('description','')})
     return out[:25]
 
-def show_deals(df):
+def show_deals(df,min_roi,min_profit,friction,show_unknown=False):
     if df is None or df.empty:
         st.info('No results.')
         return
-    st.caption(f'{len(df)} results')
-    for _,row in df.head(30).iterrows():
+    priced=df[df['buy_price_eur'].notna()].copy() if 'buy_price_eur' in df.columns else pd.DataFrame()
+    unknown=df[df['buy_price_eur'].isna()].copy() if 'buy_price_eur' in df.columns else df.copy()
+
+    if not priced.empty:
+        st.success(f'{len(priced)} tuloksessa ostohinta löytyi automaattisesti — ROI on laskettu näille.')
+    else:
+        st.warning('Tästä hausta ei löytynyt yhtään tulosta, jossa ostohinta olisi mukana hakudatassa. Näytän ilmoitukset manuaalista hintatarkistusta varten.')
+
+    display_parts=[]
+    if not priced.empty:
+        display_parts.append(priced)
+    if show_unknown or priced.empty:
+        display_parts.append(unknown.head(20))
+    display=pd.concat(display_parts,ignore_index=True) if display_parts else pd.DataFrame()
+
+    for idx,row in display.head(30).iterrows():
         title=str(row.get('title') or 'Untitled listing')
         source=str(row.get('source') or '')
-        price=row.get('buy_price_eur')
+        auto_price=row.get('buy_price_eur')
         resale=row.get('estimated_resale_eur')
-        profit=row.get('estimated_profit_eur')
-        roi=row.get('roi_pct')
-        decision=str(row.get('decision') or '')
-        risk=str(row.get('risk') or '')
         url=str(row.get('url') or '')
         snippet=str(row.get('snippet') or '')
         active=str(row.get('active_check') or '')
+        risk=str(row.get('risk') or '')
+
         with st.container(border=True):
             st.markdown(f'### {title}')
             st.caption(f'{source}  •  {active}')
             if snippet:
                 st.write(snippet)
-            c1,c2=st.columns(2)
-            with c1:
-                st.metric('Ostohinta', f'{float(price):.2f} €' if pd.notna(price) and price not in (None,'') else 'Ei saatavilla')
-                st.metric('Arvioitu jälleenmyynti', f'{float(resale):.2f} €' if pd.notna(resale) and resale not in (None,'') else '—')
-            with c2:
-                st.metric('Arvioitu voitto', f'{float(profit):.2f} €' if pd.notna(profit) and profit not in (None,'') else '—')
-                st.metric('ROI', f'{float(roi):.0f} %' if pd.notna(roi) and roi not in (None,'') else '—')
-            st.write(f'**Arvio:** {decision}   |   **Riski:** {risk}')
+
+            price_value=None
+            if pd.notna(auto_price) and auto_price not in (None,''):
+                price_value=float(auto_price)
+                st.success(f'Automaattisesti löydetty ostohinta: **{price_value:.2f} €**')
+            else:
+                st.warning('Ostohinta ei tullut hakudatassa mukana.')
+                manual=st.number_input(
+                    'Syötä ilmoituksen ostohinta (€)',
+                    min_value=0.0,
+                    max_value=2000.0,
+                    value=0.0,
+                    step=1.0,
+                    key=f'manual_price_{idx}_{hash(url)}'
+                )
+                if manual>0:
+                    price_value=float(manual)
+
+            if price_value and pd.notna(resale) and resale not in (None,''):
+                resale_value=float(resale)
+                profit=round(resale_value-price_value-resale_value*(friction/100),2)
+                roi=round(profit/price_value*100,1) if price_value>0 else 0
+                if profit>=min_profit and roi>=min_roi:
+                    decision='BUY'
+                elif profit>0 and roi>=40:
+                    decision='MAYBE'
+                else:
+                    decision='SKIP'
+                c1,c2=st.columns(2)
+                with c1:
+                    st.metric('Ostohinta',f'{price_value:.2f} €')
+                    st.metric('Arvioitu jälleenmyynti',f'{resale_value:.2f} €')
+                with c2:
+                    st.metric('Arvioitu voitto',f'{profit:.2f} €')
+                    st.metric('ROI',f'{roi:.0f} %')
+                st.write(f'**Arvio:** {decision}   |   **Riski:** {risk}')
+            else:
+                c1,c2=st.columns(2)
+                with c1:
+                    st.metric('Ostohinta','Ei saatavilla')
+                    st.metric('Arvioitu jälleenmyynti',f'{float(resale):.2f} €' if pd.notna(resale) and resale not in (None,'') else '—')
+                with c2:
+                    st.metric('Arvioitu voitto','—')
+                    st.metric('ROI','—')
+                st.write(f'**Arvio:** CHECK PRICE   |   **Riski:** {risk}')
+
             if url.startswith('http'):
                 st.link_button('Avaa ilmoitus ↗',url,width='stretch')
+
+    if not unknown.empty and not show_unknown and not priced.empty:
+        st.info(f'{len(unknown)} muuta tulosta piilotettiin, koska niistä ei löytynyt ostohintaa. Laita “Näytä myös ilman automaattista hintaa” päälle, jos haluat tarkistaa ne käsin.')
+
     with st.expander('Näytä tekninen taulukko'):
         view=df.copy()
         config={}
@@ -321,7 +375,8 @@ with t1:
         list(MARKETPLACE_DOMAINS.keys()),
         default=['Vinted','Depop','Grailed','Tradera','Sellpy']
     )
-    st.caption(f'{len(filtered)} resale targets in this category. The app checks structured product data plus multiple search snippets for price. If price is still unavailable, the result stays CHECK PRICE.')
+    show_unknown=st.toggle('Näytä myös ilman automaattista hintaa',value=False)
+    st.caption(f'{len(filtered)} resale targets. ROI näytetään vain, kun ostohinta on oikeasti tiedossa. Jos hinta puuttuu, voit syöttää sen korttiin käsin ja ROI lasketaan heti.')
     if st.button('Search Europe',type='primary'):
         raw=[]
         chosen=selected[:6]
@@ -342,7 +397,7 @@ with t1:
         if raw:
             scored=[score_item(x,min_roi,min_profit,friction) for x in raw]
             save_deals(scored)
-            show_deals(pd.DataFrame(scored).sort_values(['decision_rank','score'],ascending=[True,False]))
+            show_deals(pd.DataFrame(scored).sort_values(['decision_rank','score'],ascending=[True,False]),min_roi,min_profit,friction,show_unknown)
         else:
             st.info('No matching active-looking listings found. Try fewer selected searches, another category, or switch Preferred sourcing region to EU/Europe.')
 with t2:
@@ -355,7 +410,7 @@ with t2:
         scored=[score_item(x,min_roi,min_profit,friction) for x in raw]
         save_deals(scored)
         out=pd.DataFrame(scored).sort_values(['decision_rank','score'],ascending=[True,False])
-        show_deals(out)
+        show_deals(out,min_roi,min_profit,friction,True)
         st.download_button('Download scored deals',out.to_csv(index=False).encode(),file_name='scored_deals.csv')
 with t3:
     cat=st.selectbox('Category',['Vintage clothing']+CATEGORIES[1:]); reg=st.selectbox('Supplier region',['Finland','Nordics','EU','Europe'])
@@ -369,6 +424,6 @@ with t4:
     st.caption('Starter estimates only — verify condition, authenticity and recent sold comps before buying.')
 with t5:
     with db() as c: rows=c.execute('SELECT title,source,url,buy,resale,profit,roi,score,decision,created FROM deals ORDER BY created DESC LIMIT 500').fetchall()
-    if rows: show_deals(pd.DataFrame(rows,columns=['title','source','url','buy','resale','profit','roi','score','decision','created']))
+    if rows: st.dataframe(pd.DataFrame(rows,columns=['title','source','url','buy','resale','profit','roi','score','decision','created']),width='stretch',hide_index=True)
     else: st.info('No saved deals yet.')
 st.caption('Live search uses public indexed marketplace pages. It does not bypass marketplace anti-bot protections. Facebook Marketplace coverage can be limited because many listings are not publicly indexed.')
