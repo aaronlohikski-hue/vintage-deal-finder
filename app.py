@@ -62,6 +62,22 @@ def wholesaler_search(category,region):
             if not u or u in seen: continue
             seen.add(u); out.append({'Supplier':x.get('title',''),'URL':u,'Description':x.get('description','')})
     return out[:25]
+
+def show_deals(df):
+    view=df.copy()
+    config={}
+    if 'url' in view.columns:
+        view=view.rename(columns={'url':'Open listing'})
+        config['Open listing']=st.column_config.LinkColumn('Open listing',display_text='Open ↗')
+    st.dataframe(view,use_container_width=True,hide_index=True,column_config=config)
+
+def show_suppliers(df):
+    view=df.copy()
+    config={}
+    if 'URL' in view.columns:
+        view=view.rename(columns={'URL':'Open website'})
+        config['Open website']=st.column_config.LinkColumn('Open website',display_text='Open ↗')
+    st.dataframe(view,use_container_width=True,hide_index=True,column_config=config)
 st.title('👖 Vintage Deal Finder EU'); st.caption(f'Finland/EU sourcing across {len(PRICEBOOK)} high-interest vintage targets — denim, workwear, sportswear, Y2K, outdoor, racing, streetwear and archive.')
 with st.sidebar:
     st.header('Deal rules'); min_roi=st.number_input('Minimum ROI %',0,1000,80,10); min_profit=st.number_input('Minimum profit €',0,1000,20,5); max_buy=st.number_input('Maximum item price €',1,1000,60,5); max_shipping=st.number_input('Maximum shipping to Finland €',0,200,12,1); friction=st.number_input('Selling friction %',0,50,12,1); region=st.selectbox('Preferred sourcing region',['Finland','EU','Nordics','Europe'])
@@ -79,7 +95,9 @@ with t1:
             for q in selected: raw+=indexed_search(q,region)
         except Exception as e: st.warning(str(e))
         if raw:
-            scored=[score_item(x,min_roi,min_profit,friction) for x in raw]; save_deals(scored); st.dataframe(pd.DataFrame(scored).sort_values(['decision_rank','score'],ascending=[True,False]),use_container_width=True,hide_index=True)
+            scored=[score_item(x,min_roi,min_profit,friction) for x in raw]
+            save_deals(scored)
+            show_deals(pd.DataFrame(scored).sort_values(['decision_rank','score'],ascending=[True,False]))
 with t2:
     st.write('Upload CSV columns: title,price,shipping,url,source.'); f=st.file_uploader('CSV file',type=['csv'])
     if f:
@@ -87,11 +105,15 @@ with t2:
         for _,r in df.iterrows():
             p=float(r.get('price',0) or 0); s=float(r.get('shipping',0) or 0)
             if p<=max_buy and s<=max_shipping: raw.append({'title':str(r.get('title','')),'price':p,'shipping':s,'url':str(r.get('url','')),'source':str(r.get('source','import'))})
-        scored=[score_item(x,min_roi,min_profit,friction) for x in raw]; save_deals(scored); out=pd.DataFrame(scored).sort_values(['decision_rank','score'],ascending=[True,False]); st.dataframe(out,use_container_width=True,hide_index=True); st.download_button('Download scored deals',out.to_csv(index=False).encode(),file_name='scored_deals.csv')
+        scored=[score_item(x,min_roi,min_profit,friction) for x in raw]
+        save_deals(scored)
+        out=pd.DataFrame(scored).sort_values(['decision_rank','score'],ascending=[True,False])
+        show_deals(out)
+        st.download_button('Download scored deals',out.to_csv(index=False).encode(),file_name='scored_deals.csv')
 with t3:
     cat=st.selectbox('Category',['Vintage clothing']+CATEGORIES[1:]); reg=st.selectbox('Supplier region',['Finland','Nordics','EU','Europe'])
     if st.button('Find EU suppliers'):
-        try: st.dataframe(pd.DataFrame(wholesaler_search(cat,reg)),use_container_width=True,hide_index=True)
+        try: show_suppliers(pd.DataFrame(wholesaler_search(cat,reg)))
         except Exception as e: st.warning(str(e))
 with t4:
     price_category=st.selectbox('Filter pricebook',CATEGORIES,key='price_category')
@@ -100,6 +122,6 @@ with t4:
     st.caption('Starter estimates only — verify condition, authenticity and recent sold comps before buying.')
 with t5:
     with db() as c: rows=c.execute('SELECT title,source,url,buy,resale,profit,roi,score,decision,created FROM deals ORDER BY created DESC LIMIT 500').fetchall()
-    if rows: st.dataframe(pd.DataFrame(rows,columns=['title','source','url','buy','resale','profit','roi','score','decision','created']),use_container_width=True,hide_index=True)
+    if rows: show_deals(pd.DataFrame(rows,columns=['title','source','url','buy','resale','profit','roi','score','decision','created']))
     else: st.info('No saved deals yet.')
 st.caption('Live web search uses a search API and does not bypass marketplace anti-bot protections.')
