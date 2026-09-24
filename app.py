@@ -3,23 +3,10 @@ from urllib.parse import urlparse
 import pandas as pd
 import requests
 import streamlit as st
+from catalog import PRICEBOOK, CATEGORIES
 
 st.set_page_config(page_title='Vintage Deal Finder EU', page_icon='👖', layout='wide')
 
-PRICEBOOK = [
-    {'name':"Vintage Levi's 501",'keywords':['levis 501 vintage','levi\'s 501 vintage','levis 501 made in usa','levis 501 90s'],'resale':65,'great_buy':25,'risk':'Low-Med','signals':['made in usa','made in japan','90s','80s','black','orange tab','selvedge']},
-    {'name':"Vintage Levi's 517",'keywords':['levis 517 vintage','levi\'s 517 vintage','levis 517 bootcut','levis 517 made in usa'],'resale':70,'great_buy':25,'risk':'Low-Med','signals':['made in usa','orange tab','black','bootcut','70s','80s','90s']},
-    {'name':'Diesel Zathan','keywords':['diesel zathan','diesel zathan y2k','diesel zathan made in italy'],'resale':75,'great_buy':30,'risk':'Medium','signals':['made in italy','y2k','bootcut','whisker','distressed']},
-    {'name':'Diesel Zatiny','keywords':['diesel zatiny','diesel zatiny y2k','diesel zatiny made in italy'],'resale':70,'great_buy':30,'risk':'Medium','signals':['made in italy','y2k','bootcut','whisker']},
-    {'name':'True Religion Ricky Super T','keywords':['true religion ricky super t','true religion ricky big t','true religion super t'],'resale':75,'great_buy':30,'risk':'High','signals':['super t','big t','flap pocket','horseshoe','made in usa']},
-    {'name':'True Religion Joey','keywords':['true religion joey','true religion joey super t','true religion joey vintage'],'resale':68,'great_buy':28,'risk':'High','signals':['super t','flare','bootcut','horseshoe','flap pocket']},
-    {'name':'Miss Sixty Y2K','keywords':['miss sixty y2k','miss sixty low rise','miss sixty bootcut','miss sixty flare'],'resale':55,'great_buy':20,'risk':'Medium','signals':['low rise','flare','bootcut','y2k','embroidered','cargo']},
-    {'name':'Evisu Made in Japan / No.2','keywords':['evisu made in japan','evisu no 2','evisu no.2','evisu selvedge','evisu vintage'],'resale':135,'great_buy':50,'risk':'High','signals':['made in japan','no 2','no.2','selvedge','seagull','lot']},
-    {'name':'Vintage JNCO','keywords':['jnco vintage','jnco jeans','jnco wide leg'],'resale':115,'great_buy':45,'risk':'Medium','signals':['wide leg','huge pocket','vintage','90s','y2k']},
-    {'name':'Lee 101 / Riders','keywords':['lee 101 vintage','lee 101 selvedge','lee riders vintage','lee riders made in usa'],'resale':85,'great_buy':30,'risk':'Low-Med','signals':['selvedge','made in usa','made in japan','union made','vintage']},
-    {'name':'Carhartt Double Knee','keywords':['carhartt double knee vintage','carhartt double knee usa','carhartt carpenter vintage'],'resale':80,'great_buy':30,'risk':'Medium','signals':['double knee','made in usa','distressed','fade']},
-    {'name':'Southpole / Y2K Baggy','keywords':['southpole vintage jeans','southpole baggy y2k','y2k baggy jeans vintage'],'resale':55,'great_buy':20,'risk':'Low-Med','signals':['baggy','embroidered','wide leg','y2k']},
-]
 REGION_DOMAINS={'Finland':['vinted.fi','tori.fi','huuto.net'],'Nordics':['vinted.fi','tori.fi','tradera.com','sellpy.fi','sellpy.se'],'EU':['vinted.fi','vinted.fr','vinted.de','vinted.nl','vinted.be','vinted.es','vinted.it','vinted.pt','tori.fi','tradera.com','sellpy.fi','sellpy.se','depop.com','grailed.com'],'Europe':['vinted.fi','vinted.fr','vinted.de','vinted.nl','vinted.be','vinted.es','vinted.it','vinted.pt','tori.fi','tradera.com','sellpy.fi','sellpy.se','depop.com','grailed.com']}
 DB='/tmp/deals.db'
 def db(): return sqlite3.connect(DB)
@@ -75,12 +62,17 @@ def wholesaler_search(category,region):
             if not u or u in seen: continue
             seen.add(u); out.append({'Supplier':x.get('title',''),'URL':u,'Description':x.get('description','')})
     return out[:25]
-st.title('👖 Vintage Deal Finder EU'); st.caption('Finland/EU-focused sourcing tool — no eBay dependency.')
+st.title('👖 Vintage Deal Finder EU'); st.caption(f'Finland/EU sourcing across {len(PRICEBOOK)} high-interest vintage targets — denim, workwear, sportswear, Y2K, outdoor, racing, streetwear and archive.')
 with st.sidebar:
     st.header('Deal rules'); min_roi=st.number_input('Minimum ROI %',0,1000,80,10); min_profit=st.number_input('Minimum profit €',0,1000,20,5); max_buy=st.number_input('Maximum item price €',1,1000,60,5); max_shipping=st.number_input('Maximum shipping to Finland €',0,200,12,1); friction=st.number_input('Selling friction %',0,50,12,1); region=st.selectbox('Preferred sourcing region',['Finland','EU','Nordics','Europe'])
 t1,t2,t3,t4,t5=st.tabs(['🔥 Deal Finder','📥 Import','🏭 EU Wholesalers','📚 Pricebook','🕘 History'])
 with t1:
-    opts=sum([p['keywords'] for p in PRICEBOOK],[]); default=['levis 501 vintage','levis 517 vintage','diesel zathan','diesel zatiny','true religion ricky super t','miss sixty y2k','evisu no 2']; selected=st.multiselect('Searches',opts,default=[x for x in default if x in opts])
+    search_category=st.selectbox('Vintage category',CATEGORIES,key='deal_category')
+    filtered=PRICEBOOK if search_category=='All' else [p for p in PRICEBOOK if p['category']==search_category]
+    opts=sum([p['keywords'] for p in filtered],[])
+    suggested=[p['keywords'][0] for p in filtered[:10]]
+    selected=st.multiselect('Searches',opts,default=suggested[:8])
+    st.caption(f'{len(filtered)} resale targets in this category. Select specific searches or run the suggested set.')
     if st.button('Search Europe',type='primary'):
         raw=[]
         try:
@@ -97,11 +89,15 @@ with t2:
             if p<=max_buy and s<=max_shipping: raw.append({'title':str(r.get('title','')),'price':p,'shipping':s,'url':str(r.get('url','')),'source':str(r.get('source','import'))})
         scored=[score_item(x,min_roi,min_profit,friction) for x in raw]; save_deals(scored); out=pd.DataFrame(scored).sort_values(['decision_rank','score'],ascending=[True,False]); st.dataframe(out,use_container_width=True,hide_index=True); st.download_button('Download scored deals',out.to_csv(index=False).encode(),file_name='scored_deals.csv')
 with t3:
-    cat=st.selectbox('Category',['Vintage denim',"Levi's",'Diesel','True Religion','Miss Sixty','Evisu','Y2K clothing','Vintage workwear','Vintage clothing']); reg=st.selectbox('Supplier region',['Finland','Nordics','EU','Europe'])
+    cat=st.selectbox('Category',['Vintage clothing']+CATEGORIES[1:]); reg=st.selectbox('Supplier region',['Finland','Nordics','EU','Europe'])
     if st.button('Find EU suppliers'):
         try: st.dataframe(pd.DataFrame(wholesaler_search(cat,reg)),use_container_width=True,hide_index=True)
         except Exception as e: st.warning(str(e))
-with t4: st.dataframe(pd.DataFrame([{'Target':p['name'],'Typical resale €':p['resale'],'Strong buy ≤ €':p['great_buy'],'Counterfeit risk':p['risk'],'Signals':', '.join(p['signals'])} for p in PRICEBOOK]),use_container_width=True,hide_index=True)
+with t4:
+    price_category=st.selectbox('Filter pricebook',CATEGORIES,key='price_category')
+    price_rows=PRICEBOOK if price_category=='All' else [p for p in PRICEBOOK if p['category']==price_category]
+    st.dataframe(pd.DataFrame([{'Category':p['category'],'Target':p['name'],'Typical resale €':p['resale'],'Strong buy ≤ €':p['great_buy'],'Counterfeit risk':p['risk'],'Signals':', '.join(p['signals'])} for p in price_rows]),use_container_width=True,hide_index=True)
+    st.caption('Starter estimates only — verify condition, authenticity and recent sold comps before buying.')
 with t5:
     with db() as c: rows=c.execute('SELECT title,source,url,buy,resale,profit,roi,score,decision,created FROM deals ORDER BY created DESC LIMIT 500').fetchall()
     if rows: st.dataframe(pd.DataFrame(rows,columns=['title','source','url','buy','resale','profit','roi','score','decision','created']),use_container_width=True,hide_index=True)
