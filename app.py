@@ -1,6 +1,6 @@
 import os, re, sqlite3, hashlib, time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote_plus
 import pandas as pd
 import requests
 import streamlit as st
@@ -209,6 +209,22 @@ def wholesaler_search(category,region):
             seen.add(u); out.append({'Supplier':x.get('title',''),'URL':u,'Description':x.get('description','')})
     return out[:25]
 
+def vinted_search_url(query,max_price=None):
+    url='https://www.vinted.fi/catalog?search_text='+quote_plus(str(query))
+    if max_price and float(max_price)>0:
+        url+=f'&price_to={float(max_price):g}'
+    url+='&order=newest_first'
+    return url
+
+def quick_score(title,price,shipping,min_roi,min_profit,friction):
+    return score_item({
+        'title':title,
+        'price':price,
+        'shipping':shipping,
+        'source':'Quick Add',
+        'url':''
+    },min_roi,min_profit,friction)
+
 def show_deals(df,min_roi,min_profit,friction):
     if df is None or df.empty:
         st.info('Ei hintatiedollisia ilmoituksia tästä hausta. Kokeile toista mallia tai markkinapaikkaa.')
@@ -289,7 +305,54 @@ def show_suppliers(df):
 st.title('👖 Vintage Deal Finder EU'); st.caption(f'Finland/EU sourcing across {len(PRICEBOOK)} high-interest vintage targets — denim, workwear, sportswear, Y2K, outdoor, racing, streetwear and archive.')
 with st.sidebar:
     st.header('Deal rules'); min_roi=st.number_input('Minimum ROI %',0,1000,80,10); min_profit=st.number_input('Minimum profit €',0,1000,20,5); max_buy=st.number_input('Maximum item price €',1,1000,60,5); max_shipping=st.number_input('Maximum shipping to Finland €',0,200,12,1); friction=st.number_input('Selling friction %',0,50,12,1); region=st.selectbox('Preferred sourcing region',['Finland','EU','Nordics','Europe'],index=1)
-t1,t2,t3,t4,t5=st.tabs(['🔥 Deal Finder','📥 Import','🏭 EU Wholesalers','📚 Pricebook','🕘 History'])
+t0,t1,t2,t3,t4,t5=st.tabs(['📱 Quick Add','🔥 Deal Finder','📥 Import','🏭 EU Wholesalers','📚 Pricebook','🕘 History'])
+with t0:
+    st.subheader('📱 Quick Add')
+    st.write('Avaa aktiivinen ilmoitus Vintedissä, Depopissa tai Grailedissa. Kopioi linkki ja syötä näkyvä hinta tähän — Deal Finder laskee ROI:n heti.')
+    qurl=st.text_input('Ilmoituksen linkki',placeholder='https://www.vinted.fi/items/...')
+    qtitle=st.text_input('Tuotteen nimi / otsikko',placeholder='esim. Diesel Zathan Made in Italy W32')
+    qa, qb = st.columns(2)
+    with qa:
+        qprice=st.number_input('Ostohinta €',min_value=0.0,max_value=2000.0,value=0.0,step=1.0,key='quick_price')
+    with qb:
+        qship=st.number_input('Toimitus €',min_value=0.0,max_value=200.0,value=0.0,step=1.0,key='quick_ship')
+    if st.button('Laske diili',type='primary',key='quick_calc'):
+        if not qtitle.strip():
+            st.warning('Lisää tuotteen nimi, jotta malli voidaan tunnistaa.')
+        elif qprice<=0:
+            st.warning('Lisää ostohinta.')
+        else:
+            d=quick_score(qtitle.strip(),qprice,qship,min_roi,min_profit,friction)
+            resale=d.get('estimated_resale_eur')
+            profit=d.get('estimated_profit_eur')
+            roi=d.get('roi_pct')
+            st.markdown(f"### {d.get('matched_target') or qtitle}")
+            c1,c2=st.columns(2)
+            with c1:
+                st.metric('Ostohinta yhteensä',f"{float(d.get('total_buy_eur') or 0):.2f} €")
+                st.metric('Arvioitu jälleenmyynti',f"{float(resale):.2f} €" if resale else '—')
+            with c2:
+                st.metric('Arvioitu voitto',f"{float(profit):.2f} €" if profit is not None else '—')
+                st.metric('ROI',f"{float(roi):.0f} %" if roi is not None else '—')
+            st.write(f"**Arvio:** {d.get('decision')}   |   **Riski:** {d.get('risk')}")
+            if qurl.startswith('http'):
+                st.link_button('Avaa ilmoitus ↗',qurl,width='stretch')
+
+    st.divider()
+    st.subheader('Live-haut Vintedissä')
+    st.caption('Nämä avaavat Vintedin oman ajantasaisen haun uusimmat ensin ja rajaavat hinnan meidän Strong Buy -tasolle.')
+    qa_category=st.selectbox('Kategoria',CATEGORIES,key='quick_category')
+    qa_targets=PRICEBOOK if qa_category=='All' else [p for p in PRICEBOOK if p['category']==qa_category]
+    for p in qa_targets[:30]:
+        with st.container(border=True):
+            st.write(f"**{p['name']}**")
+            st.caption(f"Strong buy ≤ {p['great_buy']} € • jälleenmyyntiarvio {p['resale']} €")
+            st.link_button(
+                f"Hae Vintedistä ≤ {p['great_buy']} € ↗",
+                vinted_search_url(p['keywords'][0],p['great_buy']),
+                width='stretch'
+            )
+
 with t1:
     search_category=st.selectbox('Vintage category',CATEGORIES,key='deal_category')
     filtered=PRICEBOOK if search_category=='All' else [p for p in PRICEBOOK if p['category']==search_category]
